@@ -86,6 +86,8 @@
 
    > **💡 Using Ollama instead?** Set `LLM_PROVIDER=ollama` and use `CHAT_MODEL=ollama_chat/qwen2.5-coder:7b` and `INFERENCE_MODEL=ollama_chat/qwen2.5-coder:7b`.
 
+   > **💡 Using a local/self-hosted OpenAI-compatible server (vLLM, LM Studio, LocalAI)?** See [Local LLM (No Auth)](#local-llm-no-auth) below.
+
    See `.env.template` for the full list of optional configuration (logging, feature flags, object storage, email, analytics, etc.).
 
 3. **Install dependencies**
@@ -410,6 +412,156 @@ Read more in our [documentation](https://docs.potpie.ai/open-source/agents/creat
   </tr>
 </table>
 
+
+---
+
+## Local LLM (No Auth)
+
+Potpie works with any OpenAI-compatible server that requires no API key — [vLLM](https://github.com/vllm-project/vllm), [LM Studio](https://lmstudio.ai/), [LocalAI](https://github.com/go-skynet/LocalAI), [Ollama OpenAI mode](https://ollama.com/blog/openai-compatibility), etc.
+
+Add the following to your `.env`:
+
+```env
+# Point to your local server
+LLM_API_BASE=http://localhost:8000/v1
+
+# Placeholder key — the server ignores it, but LiteLLM/OpenAI SDK require something
+LLM_API_KEY=no-key-required
+
+# Use the openai/ prefix so LiteLLM routes correctly
+CHAT_MODEL=openai/my-local-model
+INFERENCE_MODEL=openai/my-local-model
+
+# Disable cloud provider keys so they don't interfere
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+OPENROUTER_API_KEY=
+
+# Tune based on what your server supports
+LLM_SUPPORTS_PYDANTIC=true
+LLM_SUPPORTS_STREAMING=true
+LLM_SUPPORTS_VISION=false
+LLM_SUPPORTS_TOOL_PARALLELISM=false
+```
+
+No code changes required — these environment variables are all that's needed.
+
+---
+
+## Multi-Repository Analysis
+
+Potpie can parse multiple local repositories and let agents reason across all of them in a single conversation. This is useful for analysing monorepos, shared libraries, or any set of related codebases.
+
+### Step 1 — Parse each repository
+
+```bash
+# Parse repo A
+curl -X POST http://localhost:8001/api/v1/parse \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/home/user/projects/backend-api"}'
+# → {"project_id": "uuid-a", "status": "submitted"}
+
+# Parse repo B
+curl -X POST http://localhost:8001/api/v1/parse \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/home/user/projects/shared-lib"}'
+# → {"project_id": "uuid-b", "status": "submitted"}
+
+# Parse repo C
+curl -X POST http://localhost:8001/api/v1/parse \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/home/user/projects/frontend-app"}'
+# → {"project_id": "uuid-c", "status": "submitted"}
+```
+
+Status progresses: `submitted` → `cloned` → `parsed` → `processing` → `inferring` → `ready`
+
+```bash
+# Poll until ready
+curl http://localhost:8001/api/v1/parsing-status/uuid-a
+# → {"status": "ready"}
+```
+
+### Step 2 — Link projects (create cross-project relationships)
+
+Once all projects are `ready`, create explicit relationships between matching functions and classes across repos:
+
+```bash
+curl -X POST http://localhost:8001/api/v1/link-projects \
+  -H "Content-Type: application/json" \
+  -d '{"project_ids": ["uuid-a", "uuid-b", "uuid-c"]}'
+# → {"linked": 42, "strategies": {"name": 30, "import_resolution": 12, "semantic": 0}}
+```
+
+This creates `CROSS_PROJECT_REFERENCES` edges in the knowledge graph using three strategies:
+- **Name matching** — same function/class name and type across repos
+- **Import resolution** — a `REFERENCES` edge in repo A resolved to a definition in repo B
+- **Semantic similarity** — embedding-based matching for equivalent implementations with different names (requires Neo4j vector index)
+
+Re-run `/link-projects` after re-parsing any of the repositories to refresh the cross-project edges.
+
+### Step 3 — Start a conversation spanning all projects
+
+```bash
+curl -X POST http://localhost:8001/api/v2/conversations/ \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{
+    "project_ids": ["uuid-a", "uuid-b", "uuid-c"],
+    "agent_ids": ["codebase_qna_agent"]
+  }'
+# → {"conversation_id": "conv-uuid"}
+```
+
+### Step 4 — Ask questions across all repos
+
+```bash
+curl -X POST http://localhost:8001/api/v2/conversations/conv-uuid/message/ \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{"content": "Which functions in backend-api call functions from shared-lib?"}'
+
+curl -X POST http://localhost:8001/api/v2/conversations/conv-uuid/message/ \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{"content": "Show me all API endpoints in the backend that the frontend calls"}'
+```
+
+### Scripted: parse all git repos in a directory
+
+```bash
+#!/bin/bash
+PARENT_DIR="/home/user/projects"
+API="http://localhost:8001/api/v1"
+PROJECT_IDS=()
+
+for repo in $(find "$PARENT_DIR" -maxdepth 2 -name ".git" -type d | sed 's/\/.git$//'); do
+  echo "Parsing: $repo"
+  PID=$(curl -s -X POST "$API/parse" \
+    -H "Content-Type: application/json" \
+    -d "{\"repo_path\": \"$repo\"}" | jq -r '.project_id')
+  PROJECT_IDS+=("$PID")
+  echo "  project_id: $PID"
+done
+
+# Wait for all to be ready
+for PID in "${PROJECT_IDS[@]}"; do
+  while true; do
+    STATUS=$(curl -s "$API/parsing-status/$PID" | jq -r '.status')
+    [ "$STATUS" = "ready" ] && echo "$PID: ready" && break
+    [ "$STATUS" = "error" ] && echo "$PID: ERROR" && break
+    echo "$PID: $STATUS (waiting...)" && sleep 5
+  done
+done
+
+# Link all projects
+PAYLOAD=$(printf '%s\n' "${PROJECT_IDS[@]}" | jq -Rsc 'split("\n")[:-1] | {project_ids: .}')
+curl -s -X POST "$API/link-projects" -H "Content-Type: application/json" -d "$PAYLOAD"
+```
+
+> **Note:** All knowledge graph tools (`get_nodes_from_tags`, `get_node_neighbours`, `get_code_from_node_id`, etc.) now accept `project_ids: List[str]` so agents automatically search across all projects in a conversation.
+
+---
 
 ## Community & Support
 
