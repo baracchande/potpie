@@ -6,6 +6,8 @@ from app.core.database import get_async_db, get_db
 from app.modules.auth.auth_service import AuthService
 from app.modules.parsing.graph_construction.parsing_controller import ParsingController
 from app.modules.parsing.graph_construction.parsing_schema import (
+    LinkProjectsRequest,
+    LinkProjectsResponse,
     ParsingRequest,
     ParsingStatusRequest,
 )
@@ -42,3 +44,25 @@ async def get_parsing_status_by_repo(
     user=Depends(AuthService.check_auth),
 ):
     return await ParsingController.fetch_parsing_status_by_repo(request, db, user)
+
+
+@router.post("/link-projects")
+async def link_projects(
+    request: LinkProjectsRequest,
+    db: Session = Depends(get_db),
+    user=Depends(AuthService.check_auth),
+):
+    from app.core.config_provider import ConfigProvider
+    from app.modules.parsing.graph_construction.cross_project_linker import CrossProjectLinker
+    neo4j_config = ConfigProvider().get_neo4j_config()
+    linker = CrossProjectLinker(
+        neo4j_uri=neo4j_config["uri"],
+        neo4j_username=neo4j_config["username"],
+        neo4j_password=neo4j_config["password"],
+    )
+    try:
+        strategies = linker.link_projects(request.project_ids)
+        total = sum(strategies.values())
+        return LinkProjectsResponse(linked=total, strategies=strategies)
+    finally:
+        linker.close()

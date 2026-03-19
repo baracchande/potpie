@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from langchain_core.tools import StructuredTool
 from neo4j import GraphDatabase
@@ -16,19 +16,19 @@ logger = setup_logger(__name__)
 
 
 class GetCodeFromNodeIdInput(BaseModel):
-    project_id: str = Field(description="The repository ID, this is a UUID")
+    project_ids: List[str] = Field(description="The repository IDs (UUIDs) to search across")
     node_id: str = Field(description="The node ID, this is a UUID")
 
 
 class GetCodeFromNodeIdTool:
     name = "Get Code and docstring From Node ID"
     description = """Retrieves code and docstring for a specific node in a repository.
-        :param project_id: string, the repository ID (UUID).
+        :param project_ids: array of strings, the repository IDs (UUIDs) to search across.
         :param node_id: string, the node ID to retrieve code for.
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "node_id": "123e4567-e89b-12d3-a456-426614174000"
             }
 
@@ -52,49 +52,51 @@ class GetCodeFromNodeIdTool:
             auth=(username, password),
         )
 
-    async def arun(self, project_id: str, node_id: str) -> Dict[str, Any]:
-        return await asyncio.to_thread(self.run, project_id, node_id)
+    async def arun(self, project_ids: List[str], node_id: str) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.run, project_ids, node_id)
 
-    def run(self, project_id: str, node_id: str) -> Dict[str, Any]:
+    def run(self, project_ids: List[str], node_id: str) -> Dict[str, Any]:
         """Synchronous version that handles the core logic"""
         try:
-            node_data = self._get_node_data(project_id, node_id)
+            node_data = self._get_node_data(project_ids, node_id)
             if not node_data:
                 logger.warning(
-                    f"Node with ID '{node_id}' not found in repo '{project_id}'"
+                    f"Node with ID '{node_id}' not found in projects '{project_ids}'"
                 )
                 return {
-                    "error": f"Node with ID '{node_id}' not found in repo '{project_id}'"
+                    "error": f"Node with ID '{node_id}' not found in the provided projects"
                 }
 
-            project = self._get_project(project_id)
+            actual_project_id = node_data["repo_id"]
+            project = self._get_project(actual_project_id)
             if not project:
-                logger.error(f"Project with ID '{project_id}' not found in database")
+                logger.error(f"Project with ID '{actual_project_id}' not found in database")
                 return {
-                    "error": f"Project with ID '{project_id}' not found in database"
+                    "error": f"Project with ID '{actual_project_id}' not found in database"
                 }
             if project.user_id != self.user_id:
                 raise ValueError(
-                    f"Project with ID '{project_id}' not found in database for user '{self.user_id}'"
+                    f"Project with ID '{actual_project_id}' not found in database for user '{self.user_id}'"
                 )
 
             return self._process_result(node_data, project, node_id)
         except Exception:
             logger.exception(
                 "Unexpected error in GetCodeFromNodeIdTool",
-                project_id=project_id,
+                project_ids=project_ids,
                 node_id=node_id,
                 user_id=self.user_id,
             )
             return {"error": "An unexpected error occurred"}
 
-    def _get_node_data(self, project_id: str, node_id: str) -> Dict[str, Any]:
+    def _get_node_data(self, project_ids: List[str], node_id: str) -> Dict[str, Any]:
         query = """
-        MATCH (n:NODE {node_id: $node_id, repoId: $project_id})
-        RETURN n.file_path AS file_path, n.start_line AS start_line, n.end_line AS end_line, n.text as code, n.docstring as docstring
+        MATCH (n:NODE {node_id: $node_id})
+        WHERE n.repoId IN $project_ids
+        RETURN n.file_path AS file_path, n.start_line AS start_line, n.end_line AS end_line, n.text as code, n.docstring as docstring, n.repoId AS repo_id
         """
         with self.neo4j_driver.session() as session:
-            result = session.run(query, node_id=node_id, project_id=project_id)
+            result = session.run(query, node_id=node_id, project_ids=project_ids)
             return result.single()
 
     def _get_project(self, project_id: str) -> Project:
@@ -106,7 +108,6 @@ class GetCodeFromNodeIdTool:
     def _process_result(
         self, node_data: Dict[str, Any], project: Project, node_id: str
     ) -> Dict[str, Any]:
-        # Check if node_data has the required fields
         if not node_data or "file_path" not in node_data:
             logger.error(
                 f"Node data is incomplete or missing file_path for node_id: {node_id}"
@@ -146,7 +147,6 @@ class GetCodeFromNodeIdTool:
             "docstring": docstring,
         }
 
-        # Truncate response if it exceeds character limits
         truncated_result = truncate_dict_response(result)
         if len(str(result)) > 80000:
             logger.warning(
@@ -189,7 +189,7 @@ def get_code_from_node_id_tool(sql_db: Session, user_id: str) -> StructuredTool:
         name="Get Code and docstring From Node ID",
         description="""Retrieves code and docstring for a specific node id in a repository given its node ID
                        Inputs for the run method:
-                       - project_id (str): The repository ID to retrieve code and docstring for, this is a UUID.
+                       - project_ids (List[str]): The repository IDs to search across, these are UUIDs.
                        - node_id (str): The node ID to retrieve code and docstring for, this is a UUID.
 
                        ⚠️ IMPORTANT: Large code content may result in truncated responses (max 80,000 characters).

@@ -52,14 +52,14 @@ class IntelligentCodeGraphTool:
     irrelevant nodes that add noise to the context. The filtering is done using rule-based
     evaluation to identify relevant nodes for integration test generation.
 
-    :param project_id: string, the repository ID (UUID).
+    :param project_ids: array of strings, the repository IDs (UUIDs) to search across.
     :param node_id: string, the ID of the node to retrieve the graph for.
     :param relevance_threshold: float, optional, minimum relevance score for a node to be included (default: 0.6).
     :param max_depth: integer, optional, maximum depth of relationships to traverse (default: 5).
 
     example:
     {
-        "project_id": "550e8400-e29b-41d4-a716-446655440000",
+        "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
         "node_id": "123e4567-e89b-12d3-a456-426614174000",
         "relevance_threshold": 0.7,
         "max_depth": 4
@@ -77,7 +77,7 @@ class IntelligentCodeGraphTool:
 
     def run(
         self,
-        project_id: str = None,
+        project_ids: List[str] = None,
         node_id: str = None,
         relevance_threshold: float = 0.6,
         max_depth: int = 5,
@@ -91,40 +91,40 @@ class IntelligentCodeGraphTool:
                     return pool.submit(
                         lambda: asyncio.run(
                             self.arun(
-                                project_id, node_id, relevance_threshold, max_depth
+                                project_ids, node_id, relevance_threshold, max_depth
                             )
                         )
                     ).result()
         except RuntimeError:
             return asyncio.run(
-                self.arun(project_id, node_id, relevance_threshold, max_depth)
+                self.arun(project_ids, node_id, relevance_threshold, max_depth)
             )
 
     async def arun(
         self,
-        project_id: str = None,
+        project_ids: List[str] = None,
         node_id: str = None,
         relevance_threshold: float = 0.6,
         max_depth: int = 5,
         **kwargs,
     ) -> Dict[str, Any]:
         """Async version of run"""
-        if isinstance(project_id, dict):
-            params = project_id
-            project_id = params.get("project_id")
+        if isinstance(project_ids, dict):
+            params = project_ids
+            project_ids = params.get("project_ids")
             node_id = params.get("node_id")
             relevance_threshold = params.get("relevance_threshold", 0.6)
             max_depth = params.get("max_depth", 5)
 
-        if not project_id or not node_id:
+        if not project_ids or not node_id:
             return {
-                "error": "Missing required parameters: project_id and node_id must be provided"
+                "error": "Missing required parameters: project_ids and node_id must be provided"
             }
 
         try:
             self.visited_nodes = set()
 
-            result = self.code_graph_tool.run(project_id, node_id, max_depth=1)
+            result = self.code_graph_tool.run(project_ids, node_id)
             if "error" in result:
                 return result
 
@@ -140,13 +140,13 @@ class IntelligentCodeGraphTool:
                 return {"error": f"Invalid root node structure for node {node_id}"}
 
             code_result = await asyncio.to_thread(
-                self.code_from_node_tool.run, project_id, node_id
+                self.code_from_node_tool.run, project_ids, node_id
             )
             root_code = code_result.get("code", "")
 
             try:
                 filtered_graph = await self._process_node_recursively_async(
-                    project_id=project_id,
+                    project_ids=project_ids,
                     node=root_node,
                     node_code=root_code,
                     relevance_threshold=relevance_threshold,
@@ -198,7 +198,7 @@ class IntelligentCodeGraphTool:
 
     async def _process_node_recursively_async(
         self,
-        project_id: str,
+        project_ids: List[str],
         node: Dict[str, Any],
         node_code: str,
         relevance_threshold: float,
@@ -224,12 +224,12 @@ class IntelligentCodeGraphTool:
         async def process_child(child, evaluation):
             if evaluation.relevance_score >= relevance_threshold:
                 child_code_result = await asyncio.to_thread(
-                    self.code_from_node_tool.run, project_id, child["id"]
+                    self.code_from_node_tool.run, project_ids, child["id"]
                 )
                 child_code = child_code_result.get("code", "")
 
                 processed_child = await self._process_node_recursively_async(
-                    project_id=project_id,
+                    project_ids=project_ids,
                     node=child,
                     node_code=child_code,
                     relevance_threshold=relevance_threshold,
@@ -442,7 +442,7 @@ def get_intelligent_code_graph_tool(
     tool = IntelligentCodeGraphTool(sql_db, provider_service, user_id)
 
     class IntelligentCodeGraphSchema(BaseModel):
-        project_id: str = Field(..., description="The repository ID (UUID).")
+        project_ids: List[str] = Field(..., description="The repository IDs (UUIDs) to search across.")
         node_id: str = Field(
             ..., description="The ID of the node to retrieve the graph for."
         )

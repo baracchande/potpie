@@ -16,19 +16,19 @@ logger = setup_logger(__name__)
 
 
 class GetCodeFromMultipleNodeIdsInput(BaseModel):
-    project_id: str = Field(description="The repository ID, this is a UUID")
-    node_ids: List[str] = Field(description="List of node IDs, this is a UUID")
+    project_ids: List[str] = Field(description="The repository IDs (UUIDs) to search across")
+    node_ids: List[str] = Field(description="List of node IDs, these are UUIDs")
 
 
 class GetCodeFromMultipleNodeIdsTool:
     name = "Get Code and docstring From Multiple Node IDs"
     description = """Retrieves code and docstring for multiple nodes in a repository.
-        :param project_id: string, the repository ID (UUID).
+        :param project_ids: array of strings, the repository IDs (UUIDs) to search across.
         :param node_ids: array, list of node IDs to retrieve code for.
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "node_ids": [
                     "123e4567-e89b-12d3-a456-426614174000",
                     "987f6543-e21b-12d3-a456-426614174000"
@@ -50,29 +50,18 @@ class GetCodeFromMultipleNodeIdsTool:
             auth=(neo4j_config["username"], neo4j_config["password"]),
         )
 
-    async def arun(self, project_id: str, node_ids: List[str]) -> Dict[str, Any]:
-        return await asyncio.to_thread(self.run, project_id, node_ids)
+    async def arun(self, project_ids: List[str], node_ids: List[str]) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.run, project_ids, node_ids)
 
-    def run(self, project_id: str, node_ids: List[str]) -> Dict[str, Any]:
-        return asyncio.run(self.run_multiple(project_id, node_ids))
+    def run(self, project_ids: List[str], node_ids: List[str]) -> Dict[str, Any]:
+        return asyncio.run(self.run_multiple(project_ids, node_ids))
 
     async def run_multiple(
-        self, project_id: str, node_ids: List[str]
+        self, project_ids: List[str], node_ids: List[str]
     ) -> Dict[str, Any]:
         try:
-            project = self._get_project(project_id)
-            if not project:
-                logger.error(f"Project with ID '{project_id}' not found in database")
-                return {
-                    "error": f"Project with ID '{project_id}' not found in database"
-                }
-            if project.user_id != self.user_id:
-                raise ValueError(
-                    f"Project with ID '{project_id}' not found in database for user '{self.user_id}'"
-                )
-
             tasks = [
-                self._retrieve_node_data(project_id, node_id, project)
+                self._retrieve_node_data(project_ids, node_id)
                 for node_id in node_ids
             ]
             completed_tasks = await asyncio.gather(*tasks)
@@ -81,40 +70,45 @@ class GetCodeFromMultipleNodeIdsTool:
                 node_id: result for node_id, result in zip(node_ids, completed_tasks)
             }
 
-            # Truncate response if it exceeds character limits
             truncated_result = truncate_dict_response(result)
             if len(str(result)) > 80000:
                 logger.warning(
-                    f"get_code_from_multiple_node_ids output truncated for {len(node_ids)} nodes, project_id={project_id}"
+                    f"get_code_from_multiple_node_ids output truncated for {len(node_ids)} nodes"
                 )
             return truncated_result
         except Exception:
             logger.exception(
                 "Unexpected error in GetCodeFromMultipleNodeIdsTool",
-                project_id=project_id,
+                project_ids=project_ids,
                 node_ids=node_ids,
                 user_id=self.user_id,
             )
             return {"error": "An unexpected error occurred"}
 
     async def _retrieve_node_data(
-        self, project_id: str, node_id: str, project: Project
+        self, project_ids: List[str], node_id: str
     ) -> Dict[str, Any]:
-        node_data = self._get_node_data(project_id, node_id)
-        if node_data:
-            return self._process_result(node_data, project, node_id)
-        else:
+        node_data = self._get_node_data(project_ids, node_id)
+        if not node_data:
             return {
-                "error": f"Node with ID '{node_id}' not found in repo '{project_id}'"
+                "error": f"Node with ID '{node_id}' not found in the provided projects"
             }
+        actual_project_id = node_data["repo_id"]
+        project = self._get_project(actual_project_id)
+        if not project:
+            return {
+                "error": f"Project with ID '{actual_project_id}' not found in database"
+            }
+        return self._process_result(node_data, project, node_id)
 
-    def _get_node_data(self, project_id: str, node_id: str) -> Dict[str, Any]:
+    def _get_node_data(self, project_ids: List[str], node_id: str) -> Dict[str, Any]:
         query = """
-        MATCH (n:NODE {node_id: $node_id, repoId: $project_id})
-        RETURN n.file_path AS file_path, n.start_line AS start_line, n.end_line AS end_line, n.text as code, n.docstring as docstring
+        MATCH (n:NODE {node_id: $node_id})
+        WHERE n.repoId IN $project_ids
+        RETURN n.file_path AS file_path, n.start_line AS start_line, n.end_line AS end_line, n.text as code, n.docstring as docstring, n.repoId AS repo_id
         """
         with self.neo4j_driver.session() as session:
-            result = session.run(query, node_id=node_id, project_id=project_id)
+            result = session.run(query, node_id=node_id, project_ids=project_ids)
             return result.single()
 
     def _get_project(self, project_id: str) -> Project:
@@ -189,8 +183,8 @@ def get_code_from_multiple_node_ids_tool(
         name="Get Code and docstring From Multiple Node IDs",
         description="""Retrieves code and docstring for multiple node ids in a repository given their node IDs
                 Inputs for the run_multiple method:
-                - project_id (str): The repository ID to retrieve code and docstring for, this is a UUID.
-                - node_ids (List[str]): A list of node IDs to retrieve code and docstring for, this is a UUID.
+                - project_ids (List[str]): The repository IDs to search across, these are UUIDs.
+                - node_ids (List[str]): A list of node IDs to retrieve code and docstring for, these are UUIDs.
 
                 ⚠️ IMPORTANT: Large code content may result in truncated responses (max 80,000 characters).
                 If the response is truncated, a notice will be included indicating the truncation occurred.""",

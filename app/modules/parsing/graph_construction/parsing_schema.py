@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,3 +36,12 @@ class ParsingStatusRequest(BaseModel):
     branch_name: Optional[str] = Field(
         default=None, description="Branch name (used if commit_id is not provided)"
     )
+
+
+class LinkProjectsRequest(BaseModel):
+    project_ids: List[str] = Field(..., description="List of project UUIDs to link together (minimum 2)")
+
+
+class LinkProjectsResponse(BaseModel):
+    linked: int
+    strategies: Dict[str, int]

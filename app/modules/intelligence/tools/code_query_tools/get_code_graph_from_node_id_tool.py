@@ -17,12 +17,12 @@ class GetCodeGraphFromNodeIdTool:
 
     name = "get_code_graph_from_node_id"
     description = """Retrieves a code graph showing relationships between nodes starting from a specific node ID.
-        :param project_id: string, the repository ID (UUID).
+        :param project_ids: array of strings, the repository IDs (UUIDs) to search across.
         :param node_id: string, the ID of the node to retrieve the graph for (UUID).
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "node_id": "123e4567-e89b-12d3-a456-426614174000"
             }
 
@@ -36,12 +36,6 @@ class GetCodeGraphFromNodeIdTool:
         """
 
     def __init__(self, sql_db: Session):
-        """
-        Initialize the tool with a SQL database session.
-
-        Args:
-            sql_db (Session): SQLAlchemy database session.
-        """
         self.sql_db = sql_db
         self.neo4j_driver = self._create_neo4j_driver()
 
@@ -53,37 +47,45 @@ class GetCodeGraphFromNodeIdTool:
             auth=(neo4j_config["username"], neo4j_config["password"]),
         )
 
-    async def arun(self, project_id: str, node_id: str) -> Dict[str, Any]:
-        return await asyncio.to_thread(self.run, project_id, node_id)
+    async def arun(self, project_ids: List[str], node_id: str) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.run, project_ids, node_id)
 
-    def run(self, project_id: str, node_id: str) -> Dict[str, Any]:
-        """
-        Run the tool to retrieve the code graph.
-
-        Args:
-            project_id (str): Repository ID.
-            node_id (str): ID of the node to retrieve the graph for.
-
-        Returns:
-            Dict[str, Any]: Code graph data or error message.
-        """
+    def run(self, project_ids: List[str], node_id: str, **kwargs) -> Dict[str, Any]:
         try:
-            project = self._get_project(project_id)
-            if not project:
+            actual_project_id = self._find_node_project(project_ids, node_id)
+            if not actual_project_id:
                 return {
-                    "error": f"Project with ID '{project_id}' not found in database"
+                    "error": f"Node with ID '{node_id}' not found in the provided projects"
                 }
 
-            graph_data = self._get_graph_data(project_id, node_id)
+            project = self._get_project(actual_project_id)
+            if not project:
+                return {
+                    "error": f"Project with ID '{actual_project_id}' not found in database"
+                }
+
+            graph_data = self._get_graph_data(actual_project_id, node_id)
             if not graph_data:
                 return {
-                    "error": f"No graph data found for node ID '{node_id}' in repo '{project_id}'"
+                    "error": f"No graph data found for node ID '{node_id}' in repo '{actual_project_id}'"
                 }
 
             return self._process_graph_data(graph_data, project)
         except Exception as e:
             logger.exception(f"An unexpected error occurred: {str(e)}")
             return {"error": f"An unexpected error occurred: {str(e)}"}
+
+    def _find_node_project(self, project_ids: List[str], node_id: str) -> Optional[str]:
+        """Find which project a node belongs to."""
+        query = """
+        MATCH (n:NODE {node_id: $node_id})
+        WHERE n.repoId IN $project_ids
+        RETURN n.repoId AS repo_id
+        """
+        with self.neo4j_driver.session() as session:
+            result = session.run(query, node_id=node_id, project_ids=project_ids)
+            record = result.single()
+            return record["repo_id"] if record else None
 
     def _get_project(self, project_id: str) -> Optional[Project]:
         """Retrieve project from the database."""
@@ -230,12 +232,12 @@ def get_code_graph_from_node_id_tool(sql_db: Session) -> StructuredTool:
         func=tool_instance.run,
         name="Get Code Graph From Node ID",
         description="""Retrieves a code graph showing relationships between nodes starting from a specific node ID.
-        :param project_id: string, the repository ID (UUID).
+        :param project_ids: array of strings, the repository IDs (UUIDs) to search across.
         :param node_id: string, the ID of the node to retrieve the graph for (UUID).
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "node_id": "123e4567-e89b-12d3-a456-426614174000"
             }
 

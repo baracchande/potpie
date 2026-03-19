@@ -326,9 +326,9 @@ class CodeGraphService:
             record = result.single()
             return dict(record["n"]) if record else None
 
-    def query_graph(self, query):
+    def query_graph(self, query, **params):
         with self.driver.session() as session:
-            result = session.run(query)
+            result = session.run(query, **params)
             return [record.data() for record in result]
 
 

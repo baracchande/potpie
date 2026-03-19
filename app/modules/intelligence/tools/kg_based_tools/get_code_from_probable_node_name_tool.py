@@ -18,7 +18,7 @@ logger = setup_logger(__name__)
 
 
 class GetCodeFromProbableNodeNameInput(BaseModel):
-    project_id: str = Field(description="The project ID, this is a UUID")
+    project_ids: List[str] = Field(description="The project IDs (UUIDs) to search across")
     probable_node_names: List[str] = Field(
         description="List of probable node names in the format of 'file_path:function_name' or 'file_path:class_name' or 'file_path'"
     )
@@ -27,12 +27,12 @@ class GetCodeFromProbableNodeNameInput(BaseModel):
 class GetCodeFromProbableNodeNameTool:
     name = "Get Code and docstring From Probable Node Name"
     description = """Retrieves code for nodes matching probable names in a repository.
-        :param project_id: string, the project ID (UUID).
+        :param project_ids: array of strings, the project IDs (UUIDs) to search across.
         :param probable_node_names: array, list of probable node names in format 'file_path:function_name' or 'file_path:class_name'.
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "probable_node_names": [
                     "src/services/auth.ts:validateToken",
                     "src/models/User.ts:User"
@@ -56,71 +56,66 @@ class GetCodeFromProbableNodeNameTool:
         )
 
     async def process_probable_node_name(
-        self, project_id: str, probable_node_name: str
+        self, project_ids: List[str], probable_node_name: str
     ):
         try:
             node_id_query = " ".join(
                 probable_node_name.replace("/", " ").replace(":", " ").split()
             )
-            relevance_search = await self.search_service.search_codebase(
-                project_id, node_id_query
-            )
             node_id = None
-            if relevance_search:
-                node_id = relevance_search[0]["node_id"]
+            found_project_id = None
+            for project_id in project_ids:
+                relevance_search = await self.search_service.search_codebase(
+                    project_id, node_id_query
+                )
+                if relevance_search:
+                    node_id = relevance_search[0]["node_id"]
+                    found_project_id = project_id
+                    break
 
             if not node_id:
                 return {
-                    "error": f"Node with name '{probable_node_name}' not found in project '{project_id}'"
+                    "error": f"Node with name '{probable_node_name}' not found in the provided projects"
                 }
 
-            return await self.execute(project_id, node_id)
+            return await self.execute(found_project_id, node_id)
         except Exception:
             logger.exception(
                 "Unexpected error in GetCodeFromProbableNodeNameTool",
-                project_id=project_id,
+                project_ids=project_ids,
                 probable_node_name=probable_node_name,
                 user_id=self.user_id,
             )
             return {"error": "An unexpected error occurred"}
 
     async def find_node_from_probable_name(
-        self, project_id: str, probable_node_names: List[str]
+        self, project_ids: List[str], probable_node_names: List[str]
     ) -> List[Dict[str, Any]]:
         tasks = [
-            self.process_probable_node_name(project_id, name)
+            self.process_probable_node_name(project_ids, name)
             for name in probable_node_names
         ]
         return await asyncio.gather(*tasks)
 
     async def arun(
-        self, project_id: str, probable_node_names: List[str]
+        self, project_ids: List[str], probable_node_names: List[str]
     ) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self.run, project_id, probable_node_names)
+        return await asyncio.to_thread(self.run, project_ids, probable_node_names)
 
     def run(
-        self, project_id: str, probable_node_names: List[str]
+        self, project_ids: List[str], probable_node_names: List[str]
     ) -> List[Dict[str, Any]]:
         return asyncio.run(
             asyncio.to_thread(
-                self.get_code_from_probable_node_name, project_id, probable_node_names
+                self.get_code_from_probable_node_name, project_ids, probable_node_names
             )
         )
 
     def get_code_from_probable_node_name(
-        self, project_id: str, probable_node_names: List[str]
+        self, project_ids: List[str], probable_node_names: List[str]
     ) -> List[Dict[str, Any]]:
-        project = asyncio.run(
-            ProjectService(self.sql_db).get_project_repo_details_from_db(
-                project_id, self.user_id
-            )
-        )
-        if not project:
-            raise ValueError(
-                f"Project with ID '{project_id}' not found in database for user '{self.user_id}'"
-            )
         return asyncio.run(
-            self.find_node_from_probable_name(project_id, probable_node_names)
+            self.find_node_from_probable_name(project_ids, probable_node_names)
         )
 
     async def execute(self, project_id: str, node_id: str) -> Dict[str, Any]:
@@ -175,7 +170,6 @@ class GetCodeFromProbableNodeNameTool:
 
         relative_file_path = self._get_relative_file_path(file_path)
 
-        # Handle None values for start_line and clamp to minimum of 0
         adjusted_start_line = max(0, start_line - 3) if start_line is not None else 0
 
         code_content = CodeProviderService(self.sql_db).get_file_content(
@@ -201,7 +195,6 @@ class GetCodeFromProbableNodeNameTool:
             "docstring": docstring,
         }
 
-        # Truncate response if it exceeds character limits
         truncated_result = truncate_dict_response(result)
         if len(str(result)) > 80000:
             logger.warning(
@@ -245,13 +238,13 @@ def get_code_from_probable_node_name_tool(
         coroutine=tool_instance.arun,
         func=tool_instance.run,
         name="Get Code and docstring From Probable Node Name",
-        description="""Retrieves code for nodes matching probable names in a repository.
-        :param project_id: string, the project ID (UUID).
+        description="""Retrieves code for nodes matching probable names across one or more repositories.
+        :param project_ids: array of strings, the project IDs (UUIDs) to search across.
         :param probable_node_names: array, list of probable node names in format 'file_path:function_name' or 'file_path:class_name'.
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "probable_node_names": [
                     "src/services/auth.ts:validateToken",
                     "src/models/User.ts:User"

@@ -7,13 +7,12 @@ from pydantic import BaseModel, Field
 from app.core.config_provider import ConfigProvider
 from app.core.database import get_db
 from app.modules.parsing.graph_construction.code_graph_service import CodeGraphService
-from app.modules.projects.projects_service import ProjectService
 
 
 class GetNodesFromTagsInput(BaseModel):
     tags: List[str] = Field(description="A list of tags to filter the nodes by")
-    project_id: str = Field(
-        description="The project id metadata for the project being evaluated"
+    project_ids: List[str] = Field(
+        description="The project IDs (UUIDs) to search across"
     )
 
 
@@ -21,11 +20,11 @@ class GetNodesFromTags:
     name = "Get Nodes from Tags"
     description = """Fetch nodes from the knowledge graph based on specified tags.
         :param tags: array, list of tags to filter nodes by. Valid tags are: API, WEBSOCKET, PRODUCER, CONSUMER, DATABASE, SCHEMA, EXTERNAL_SERVICE, CONFIGURATION, SCRIPT.
-        :param project_id: string, the project ID (UUID).
+        :param project_ids: array of strings, the project IDs (UUIDs) to search across.
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "tags": ["API", "DATABASE"]
             }
 
@@ -46,10 +45,10 @@ class GetNodesFromTags:
         self.sql_db = sql_db
         self.user_id = user_id
 
-    async def arun(self, tags: List[str], project_id: str) -> str:
-        return await asyncio.to_thread(self.run, tags, project_id)
+    async def arun(self, tags: List[str], project_ids: List[str]) -> str:
+        return await asyncio.to_thread(self.run, tags, project_ids)
 
-    def run(self, tags: List[str], project_id: str) -> str:
+    def run(self, tags: List[str], project_ids: List[str]) -> str:
         """
         Get nodes from the knowledge graph based on the provided tags.
         Inputs for the fetch_nodes method:
@@ -76,24 +75,14 @@ class GetNodesFromTags:
            * ANIMATION: Does the code define UI animations? Check for animation logic.
            * ACCESSIBILITY: Does the code implement a11y features? Look for accessibility code.
            * DATA_FETCHING: Does the code fetch frontend data? Check for data retrieval logic.
-        - project_id (str): The ID of the project being evaluated, this is a UUID.
+        - project_ids (List[str]): The IDs of the projects to search across, these are UUIDs.
         """
-        project = asyncio.run(
-            ProjectService(self.sql_db).get_project_repo_details_from_db(
-                project_id, self.user_id
-            )
-        )
-        if not project:
-            raise ValueError(
-                f"Project with ID '{project_id}' not found in database for user '{self.user_id}'"
-            )
         tag_conditions = " OR ".join([f"'{tag}' IN n.tags" for tag in tags])
         query = f"""MATCH (n:NODE)
-        WHERE ({tag_conditions}) AND n.repoId = '{project_id}'
+        WHERE ({tag_conditions}) AND n.repoId IN $project_ids
         RETURN n.file_path AS file_path, COALESCE(n.docstring, substring(n.text, 0, 500)) AS docstring, n.text AS text, n.node_id AS node_id, n.name AS name
         """
         nodes = []
-        # Properly manage the DB generator to ensure cleanup
         gen = get_db()
         db = None
         code_graph_service = None
@@ -106,12 +95,12 @@ class GetNodesFromTags:
                 neo4j_config["password"],
                 db,
             )
-            nodes = code_graph_service.query_graph(query)
+            nodes = code_graph_service.query_graph(query, project_ids=project_ids)
         except Exception as e:
             import logging
 
             logging.warning(
-                f"Error querying graph for tags for project {project_id}: {e}"
+                f"Error querying graph for tags for projects {project_ids}: {e}"
             )
             return []
         finally:
@@ -120,13 +109,10 @@ class GetNodesFromTags:
                     code_graph_service.close()
                 except Exception:
                     pass
-            # Close the generator to trigger its finally block, which closes the DB session
             if gen:
                 try:
                     gen.close()
                 except (GeneratorExit, StopIteration):
-                    # GeneratorExit is expected when closing a generator
-                    # StopIteration may occur if generator is already exhausted
                     pass
         return nodes
 
@@ -137,7 +123,7 @@ def get_nodes_from_tags_tool(sql_db, user_id) -> StructuredTool:
         func=GetNodesFromTags(sql_db, user_id).run,
         name="Get Nodes from Tags",
         description="""
-        Fetch nodes from the knowledge graph based on specified tags. Use this tool to retrieve nodes of specific types for a project.
+        Fetch nodes from the knowledge graph based on specified tags. Use this tool to retrieve nodes of specific types across one or more projects.
 
         Input:
         - tags (List[str]): A list of tags to filter nodes. Valid tags include:
@@ -145,7 +131,7 @@ def get_nodes_from_tags_tool(sql_db, user_id) -> StructuredTool:
         UI_COMPONENT, FORM_HANDLING, STATE_MANAGEMENT, DATA_BINDING, ROUTING,
         EVENT_HANDLING, STYLING, MEDIA, ANIMATION, ACCESSIBILITY, DATA_FETCHING
 
-        - project_id (str): The UUID of the project being evaluated
+        - project_ids (List[str]): The UUIDs of the projects to search across
 
         Usage guidelines:
         1. Use for broad queries requiring ALL nodes of specific types.

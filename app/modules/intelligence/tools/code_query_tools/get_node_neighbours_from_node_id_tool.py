@@ -13,7 +13,7 @@ from app.core.config_provider import config_provider
 
 
 class GetNodeNeighboursInput(BaseModel):
-    project_id: str = Field(..., description="The repository ID (UUID)")
+    project_ids: List[str] = Field(..., description="The repository IDs (UUIDs) to search across")
     node_ids: List[str] = Field(
         ..., description="List of node IDs to retrieve neighbors for"
     )
@@ -24,12 +24,12 @@ class GetNodeNeighboursFromNodeIdTool:
 
     name = "get_node_neighbours_from_node_id"
     description = """Retrieves neighbors of a specific node in a repository.
-        :param project_id: string, the repository ID (UUID).
+        :param project_ids: array of strings, the repository IDs (UUIDs) to search across.
         :param node_ids: array, list of node IDs to retrieve neighbors for.
 
             example:
             {
-                "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                "project_ids": ["550e8400-e29b-41d4-a716-446655440000"],
                 "node_ids": ["123e4567-e89b-12d3-a456-426614174000"]
             }
 
@@ -37,12 +37,6 @@ class GetNodeNeighboursFromNodeIdTool:
         """
 
     def __init__(self, sql_db: Session):
-        """
-        Initialize the tool with a SQL database session.
-
-        Args:
-            sql_db (Session): SQLAlchemy database session.
-        """
         self.sql_db = sql_db
         self.neo4j_driver = self._create_neo4j_driver()
 
@@ -54,25 +48,15 @@ class GetNodeNeighboursFromNodeIdTool:
             auth=(neo4j_config["username"], neo4j_config["password"]),
         )
 
-    async def arun(self, project_id: str, node_ids: List[str]) -> Dict[str, Any]:
-        return await asyncio.to_thread(self.run, project_id, node_ids)
+    async def arun(self, project_ids: List[str], node_ids: List[str]) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.run, project_ids, node_ids)
 
-    def run(self, project_id: str, node_ids: List[str]) -> Dict[str, Any]:
-        """
-        Run the tool to retrieve neighbors of the specified nodes.
-
-        Args:
-            project_id (str): Project ID.
-            node_ids (List[str]): List of node IDs to retrieve neighbors for. Should contain atleast one node ID.
-
-        Returns:
-            Dict[str, Any]: Neighbor data or error message.
-        """
+    def run(self, project_ids: List[str], node_ids: List[str]) -> Dict[str, Any]:
         try:
-            result_neighbors = self._get_neighbors(project_id, node_ids)
+            result_neighbors = self._get_neighbors(project_ids, node_ids)
             if not result_neighbors:
                 return {
-                    "error": f"No neighbors found for node IDs in project '{project_id}'"
+                    "error": f"No neighbors found for node IDs in projects '{project_ids}'"
                 }
 
             return {"neighbors": result_neighbors}
@@ -81,20 +65,18 @@ class GetNodeNeighboursFromNodeIdTool:
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
     def _get_neighbors(
-        self, project_id: str, node_ids: List[str]
+        self, project_ids: List[str], node_ids: List[str]
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Retrieve neighbors from Neo4j within 2 hops in either direction.
-
-        Returns a list of dictionaries containing node_id, name and docstring for each neighbor.
+        Retrieve neighbors from Neo4j within 1 hop in either direction across the given projects.
         """
         query = """
         MATCH (n:NODE)
-        WHERE n.repoId = $project_id AND n.node_id IN $node_ids
+        WHERE n.repoId IN $project_ids AND n.node_id IN $node_ids
         CALL {
             WITH n
             MATCH (n)-[*1..1]-(neighbor:NODE)
-            WHERE neighbor.repoId = $project_id
+            WHERE neighbor.repoId IN $project_ids
             RETURN DISTINCT neighbor.node_id AS node_id,
                    neighbor.name AS name,
                    neighbor.docstring AS docstring
@@ -106,7 +88,7 @@ class GetNodeNeighboursFromNodeIdTool:
         }) as neighbors
         """
         with self.neo4j_driver.session() as session:
-            result = session.run(query, project_id=project_id, node_ids=node_ids)
+            result = session.run(query, project_ids=project_ids, node_ids=node_ids)
             record = result.single()
 
             if not record:
@@ -138,6 +120,6 @@ def get_node_neighbours_from_node_id_tool(sql_db: Session) -> StructuredTool:
         coroutine=tool_instance.arun,
         func=tool_instance.run,
         name="Get Node Neighbours From Node ID",
-        description="Retrieves inbound and outbound neighbors of a specific node in a repository given its node ID. This is helpful to find which functions are called by a specific function and which functions are calling the specific function. Works best with Pythoon, JS and TS code.",
+        description="Retrieves inbound and outbound neighbors of a specific node across one or more projects given its node ID. This is helpful to find which functions are called by a specific function and which functions are calling the specific function. Works best with Python, JS and TS code.",
         args_schema=GetNodeNeighboursInput,
     )
