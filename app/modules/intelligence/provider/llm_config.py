@@ -349,7 +349,7 @@ def get_config_for_model(model_string: str) -> Dict[str, Any]:
             "supports_vision": provider in {"openai", "anthropic"},
             "supports_tool_parallelism": provider in {"openai", "anthropic"},
         },
-        "base_url": None,
+        "base_url": env_base_url,
         "api_version": None,
         "auth_provider": provider,
     }

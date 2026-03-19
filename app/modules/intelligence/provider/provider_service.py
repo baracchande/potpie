@@ -731,6 +731,8 @@ class ProviderService:
             api_key = os.environ.get("OLLAMA_API_KEY", "ollama")
         if not api_key:
             api_key = os.environ.get("LLM_API_KEY", api_key)
+        if not api_key and os.environ.get("LLM_API_BASE"):
+            api_key = "no-key-required"
 
         params = config.get_llm_params(api_key)
 
@@ -745,6 +747,8 @@ class ProviderService:
             params["base_url"] = os.environ.get(
                 "LLM_API_BASE", "http://localhost:11434"
             )
+        if not params.get("base_url") and os.environ.get("LLM_API_BASE"):
+            params["base_url"] = os.environ.get("LLM_API_BASE")
         if config.api_version:
             params["api_version"] = config.api_version
 
@@ -1434,9 +1438,12 @@ class ProviderService:
             api_key = os.environ.get("LLM_API_KEY", api_key)
 
         if not api_key and config.auth_provider not in {"ollama"}:
-            raise UnsupportedProviderError(
-                f"API key not found for provider '{config.auth_provider}'."
-            )
+            if os.environ.get("LLM_API_BASE"):
+                api_key = os.environ.get("LLM_API_KEY", "no-key-required")
+            else:
+                raise UnsupportedProviderError(
+                    f"API key not found for provider '{config.auth_provider}'."
+                )
 
         model_name = (
             target_model.split("/", 1)[1] if "/" in target_model else target_model
