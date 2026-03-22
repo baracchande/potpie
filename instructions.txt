@@ -1,0 +1,107 @@
+1. Start Potpie
+
+cd d:/code/github-forks/potpie
+chmod +x scripts/start.sh
+./scripts/start.sh
+Verify it's running:
+
+
+curl -X GET 'http://localhost:8001/health'
+2. Parse each repo
+
+API="http://localhost:8001/api/v1"
+
+# Parse all 17 repos
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.framework.chassis"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.framework.common"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.account"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.api.management"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.app.management"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.dataset.inbound.api"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.dataset.inbound"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.dataset.management"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.dataset.subscription"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.download.management"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.masterdata"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.metrics"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.notification"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.outbound.push"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.provider.marketplace"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.service.reviews.management"}'
+curl -s -X POST "$API/parse" -H "Content-Type: application/json" -d '{"repo_path": "D:/code/nexus-repos-originals/odcp.web"}'
+Each call returns a project_id. Save them all. Status progresses: submitted -> cloned -> parsed -> processing -> inferring -> ready.
+
+3. Poll parsing status until all are ready
+
+# Replace with actual project IDs from step 2
+curl -s "$API/parsing-status/<project-id>"
+# Repeat for each project_id until all return {"status": "ready"}
+4. Link all projects
+
+curl -s -X POST "$API/link-projects" \
+  -H "Content-Type: application/json" \
+  -d '{"project_ids": ["<id-1>", "<id-2>", "<id-3>", "...all 17 ids..."]}'
+5. Start a conversation spanning all repos
+
+curl -X POST "http://localhost:8001/api/v2/conversations/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_ids": ["<id-1>", "<id-2>", "...all 17 ids..."],
+    "agent_ids": ["codebase_qna_agent"]
+  }'
+# Returns a conversation_id
+6. Ask questions across all repos
+
+CONV_ID="<conversation-id-from-step-5>"
+
+curl -X POST "http://localhost:8001/api/v2/conversations/$CONV_ID/message/" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Which functions in the framework repos are called by the service repos?"}'
+
+curl -X POST "http://localhost:8001/api/v2/conversations/$CONV_ID/message/" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Show me all API endpoints across all services"}'
+
+curl -X POST "http://localhost:8001/api/v2/conversations/$CONV_ID/message/" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "How does the dataset inbound service interact with dataset management?"}'
+
+------------
+
+The docker-compose.yaml is ready. Here's what it sets up:
+
+Infrastructure:
+
+PostgreSQL 16 — main database on port 5432, with healthcheck
+Neo4j 5 — knowledge graph DB on ports 7474/7687, with APOC plugin
+Redis 7 — message broker on port 6379
+Application:
+
+api — FastAPI backend on port 8001 (runs Alembic migrations on startup, then Gunicorn)
+celery-worker — background task processor for repo parsing and agent tasks
+ui — Next.js frontend on port 3000
+flower — Celery monitoring dashboard on port 5555 (opt-in via --profile monitoring)
+Key design decisions:
+
+All service connection strings are overridden in environment: to use Docker-internal hostnames (postgres, neo4j, redis) — your .env file only needs API keys and feature flags
+api and celery-worker share a project_repos volume so cloned repos are accessible to both
+Services wait on healthchecks before starting (depends_on with condition: service_healthy)
+Flower is behind the monitoring profile — only starts with docker compose --profile monitoring up
+To use:
+
+Copy .env.template to .env and fill in at minimum OPENAI_API_KEY (or your preferred LLM provider key)
+Run:
+
+docker compose up --build
+Access the app at http://localhost:3000, API at http://localhost:8001/health
+Optionally add Flower: docker compose --profile monitoring up --build
+
+All volumes now bind-mount under ./data/:
+
+Host path	Container path	Service
+./data/postgres/	/var/lib/postgresql/data	PostgreSQL
+./data/neo4j/data/	/data	Neo4j
+./data/neo4j/logs/	/logs	Neo4j
+./data/redis/	/data	Redis
+./data/projects/	/app/projects	API + Celery
+To reuse this data from another project, just point at the same absolute path (e.g. d:/code/github-forks/potpie/data/postgres). Also added data/ to .gitignore to keep it out of version control.
